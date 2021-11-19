@@ -1,35 +1,72 @@
 #!/usr/bin/env bash
 set -e
 
-echo "Hello gh-smerge!"
+die() {
+  echo $@ >&2
+  exit 1
+}
 
-# Snippets to help get started:
+query() {
+    echo "$JSON" | jq -r "$1"
+}
 
-# Determine if an executable is in the PATH
-# if ! type -p ruby >/dev/null; then
-#   echo "Ruby not found on the system" >&2
-#   exit 1
-# fi
+JSON="$(gh repo view --json 'id')"
+CURRENT_REPO_ID="$(query '.id')"
 
-# Pass arguments through to another command
-# gh issue list "$@" -R cli/cli
+JSON="$(gh pr view --json 'baseRefName,headRefName,mergeable,state,isDraft,number,headRepository,baseRepository' $@)"
+NUMBER="$(query '.number')"
+BASE_REF="$(query '.baseRefName')"
+BASE_REPO_ID="$(query '.baseRepository.id')"
+HEAD_REF="$(query '.headRefName')"
+HEAD_REPO_ID="$(query '.headRepository.id')"
+HEAD_REPO_OWNER="$(query '.headRepositoryOwner.login')"
+IS_DRAFT="$(query '.isDraft')"
+MERGEABLE="$(query '.mergeable')"
+STATE="$(query '.state')"
 
-# Using the gh api command to retrieve and format information
-# QUERY='
-#   query($endCursor: String) {
-#     viewer {
-#       repositories(first: 100, after: $endCursor) {
-#         nodes {
-#           nameWithOwner
-#           stargazerCount
-#         }
-#       }
-#     }
-#   }
-# '
-# TEMPLATE='
-#   {{- range $repo := .data.viewer.repositories.nodes -}}
-#     {{- printf "name: %s - stargazers: %v\n" $repo.nameWithOwner $repo.stargazerCount -}}
-#   {{- end -}}
-# '
-# exec gh api graphql -f query="${QUERY}" --paginate --template="${TEMPLATE}"
+if [ $CURRENT_REPO_ID != $BASE_REPO_ID ]; then
+    die "ERROR: Current working directory is not the repository to merge into."
+fi
+
+if [ $STATE != "OPEN" ]; then
+    die "ERROR: The pull request is no longer opened."
+fi
+
+if [ $MERGEABLE != "MERGEABLE" ]; then
+    die "ERROR: Resolving conflicts is needed to continue the merge."
+fi
+
+if [ $IS_DRAFT = "true" ]; then
+    die "ERROR: The pull request is draft."
+fi
+
+ORIGIN="origin"
+
+if [ $BASE_REPO_ID != $HEAD_REPO_ID ]; then
+    JSON="$(gh repo view --json 'url' "${HEAD_REPO_ID}")"
+    HEAD_REPO_URL="$(query '.url')"
+    UPSTREAM="upstream"
+
+    git remote add "${ORIGIN}" "${HEAD_REPO_URL}"
+else
+    UPSTREAM="${ORIGIN}"
+fi
+
+CURRENT_BRANCH="$(git branch --show-current)"
+
+# First, fetches changes from the origin and the upstream.
+git fetch "${UPSTREAM}"
+git fetch "${ORIGIN}"
+
+# Next, switches to the base branch, then merges the head branch.
+git switch "${ORIGIN}/${BASE_REF}"
+git merge -m - --no-ff "${UPSTREAM}/${HEAD_REF}" <<"EOS"
+Merge branch #${NUMBER} from ${HEAD_REPO_OWNER}/${HEAD_REF}
+X-Committed-Using: https://github.com/siketyan/gh-smerge
+EOS
+
+# And push to the origin.
+git push "${ORIGIN}" "${BASE_REF}"
+
+# Lastly pop the working branch.
+git switch "${CURRENT_BRANCH}"
