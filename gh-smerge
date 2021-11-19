@@ -10,13 +10,35 @@ query() {
     echo "$JSON" | jq -r "$1"
 }
 
-JSON="$(gh repo view --json 'id')"
-CURRENT_REPO_ID="$(query '.id')"
+cmd() {
+    echo -e "\e[97m:: $@\e[0m" >&2
+    echo -e "\e[90m" >&2
+    
+    RESULT="$(exec $@)" >&2
 
-JSON="$(gh pr view --json 'baseRefName,headRefName,mergeable,state,isDraft,number,headRepository,baseRepository' $@)"
+    echo "${RESULT}" >&2
+    echo -e "\e[0m" >&2
+
+    echo "${RESULT}"
+}
+
+run() {
+    echo -e "\e[97m:: $@\e[0m" >&2
+    echo -e "\e[90m" >&2
+
+    $@ >&2
+
+    echo -e "\e[0m" >&2
+}
+
+JSON="$(cmd gh repo view --json 'id,url')"
+CURRENT_REPO_ID="$(query '.id')"
+CURRENT_REPO_URL="$(query '.url')"
+
+JSON="$(cmd gh pr view --json 'baseRefName,headRefName,mergeable,state,isDraft,number,headRepository,headRepositoryOwner,url' $@)"
 NUMBER="$(query '.number')"
+URL="$(query '.url')"
 BASE_REF="$(query '.baseRefName')"
-BASE_REPO_ID="$(query '.baseRepository.id')"
 HEAD_REF="$(query '.headRefName')"
 HEAD_REPO_ID="$(query '.headRepository.id')"
 HEAD_REPO_OWNER="$(query '.headRepositoryOwner.login')"
@@ -24,7 +46,7 @@ IS_DRAFT="$(query '.isDraft')"
 MERGEABLE="$(query '.mergeable')"
 STATE="$(query '.state')"
 
-if [ $CURRENT_REPO_ID != $BASE_REPO_ID ]; then
+if ! echo "${URL}" | grep -q "${CURRENT_REPO_URL}"; then
     die "ERROR: Current working directory is not the repository to merge into."
 fi
 
@@ -36,14 +58,15 @@ if [ $MERGEABLE != "MERGEABLE" ]; then
     die "ERROR: Resolving conflicts is needed to continue the merge."
 fi
 
-if [ $IS_DRAFT = "true" ]; then
+if [ $IS_DRAFT == "true" ]; then
     die "ERROR: The pull request is draft."
 fi
 
+BASE_REPO_ID="${CURRENT_REPO_ID}"
 ORIGIN="origin"
 
 if [ $BASE_REPO_ID != $HEAD_REPO_ID ]; then
-    JSON="$(gh repo view --json 'url' "${HEAD_REPO_ID}")"
+    JSON="$(cmd gh repo view --json 'url' "${HEAD_REPO_ID}")"
     HEAD_REPO_URL="$(query '.url')"
     UPSTREAM="upstream"
 
@@ -52,21 +75,22 @@ else
     UPSTREAM="${ORIGIN}"
 fi
 
-CURRENT_BRANCH="$(git branch --show-current)"
+CURRENT_BRANCH="$(cmd git branch --show-current)"
 
 # First, fetches changes from the origin and the upstream.
-git fetch "${UPSTREAM}"
-git fetch "${ORIGIN}"
+run git fetch "${UPSTREAM}"
+run git fetch "${ORIGIN}"
 
 # Next, switches to the base branch, then merges the head branch.
-git switch "${ORIGIN}/${BASE_REF}"
-git merge -m - --no-ff "${UPSTREAM}/${HEAD_REF}" <<"EOS"
+run git checkout "${ORIGIN}/${BASE_REF}"
+run git merge --no-ff "${UPSTREAM}/${HEAD_REF}"
+run git commit --amend -F - <<EOS
 Merge branch #${NUMBER} from ${HEAD_REPO_OWNER}/${HEAD_REF}
 X-Committed-Using: https://github.com/siketyan/gh-smerge
 EOS
 
 # And push to the origin.
-git push "${ORIGIN}" "${BASE_REF}"
+run git push "${ORIGIN}" "HEAD:${BASE_REF}"
 
 # Lastly pop the working branch.
-git switch "${CURRENT_BRANCH}"
+run git checkout "${CURRENT_BRANCH}"
